@@ -23,6 +23,7 @@ pthread_mutex_t queue_lock;
 size_t get_queue_status(char *c) {
     size_t result = 0;
     pthread_mutex_lock(&queue_lock);
+    printf("LOCKED AT: %i\n", __LINE__);
     exec_queue *nh = head;
     while(nh) {
         if (!strncmp(nh->path, c, 6)) {
@@ -33,6 +34,7 @@ size_t get_queue_status(char *c) {
     }
     result = SIZE_MAX;
 ret:
+    printf("UNLOCKED AT: %i\n", __LINE__);
     pthread_mutex_unlock(&queue_lock);
     return result;
 }
@@ -89,11 +91,12 @@ HTTP(recieveimages) {
             char *img = dirappend(proc_uuid, c);
             int fd = open(img, O_RDWR|O_CREAT, 0777);
             if (fd != -1) {
-                free(img);
                 write(fd, image->data, image->data_len);
                 close(fd);
                 written++;
             }
+            free(img);
+            free(c);
         }
     }
     free(proc_uuid);
@@ -110,6 +113,7 @@ HTTP(recieveimages) {
     }
 
     pthread_mutex_lock(&queue_lock);
+    printf("LOCKED AT: %i\n", __LINE__);
     exec_queue *fnew = calloc(sizeof(exec_queue), 1);
     fnew->path = strdup(uuid);
     fnew->next = NULL;
@@ -120,12 +124,16 @@ HTTP(recieveimages) {
         head = fnew;
         tail = fnew;
     }
+    printf("UNLOCKED AT: %i\n", __LINE__);
     pthread_mutex_unlock(&queue_lock);
 
     HTTP_STATUS(200, "OK", "text/html");
-    HTTP_WRITE("<html><head><meta http-equiv=\"refresh\" content=\"0; url=/view/");
+    //HTTP_WRITE("<html><head><meta http-equiv=\"refresh\" content=\"0; url=/view/");
+    //HTTP_WRITE(uuid);
+    //HTTP_WRITE("\" /></head><body><h1>redirecting to image page</h1></body></html>");
+    HTTP_WRITE("<html><body>click<a href='/view/");
     HTTP_WRITE(uuid);
-    HTTP_WRITE("\" /></head><body><h1>redirecting to image page</h1></body></html>");
+    HTTP_WRITE("'>here</a> to see images</body></html>");
     free(uuid);
     HTTP_DONE();
 }
@@ -142,16 +150,81 @@ HTTP(landing) {
     HTTP_DONE();
 }
 
+bool dir_exists(char *c) {
+    if (strlen(c) != 6) {
+        return false;
+    }
+    char *p = dirappend("processing", c);
+    char *pp = dirappend(p, "");
+    free(p);
+    if (0 != access(pp, F_OK)) {
+        if (ENOENT == errno) {
+            free(pp);
+            return false;
+        }
+        if (ENOTDIR == errno) {
+            free(pp);
+            return false;
+        }
+    }
+    free(pp);
+    return true;
+}
+
+HTTP(send_image) {
+    string *proc = api->first;
+    list *img_l = api->rest;
+    string *img = img_l->first;
+
+    char *c = dirappend("processing", proc->str);
+    char *cc = dirappend(c, img->str);
+    free(c);
+    if(access(cc, F_OK) != -1) {
+        HTTP_STATUS(200, "OK", "image/jpeg");
+        HTTP_FILE(cc);
+    } else {
+        HTTP_STATUS(404, "NOT_FOUND", "text/plain");
+        HTTP_WRITE("waiting");
+    }
+    free(cc);
+    HTTP_DONE();
+}
+
 HTTP(showprogress) {
     string *api_path = api->first;
     HTTP_STATUS(200, "OK", "text/html");
     size_t status = get_queue_status(api_path->str);
-    if (status == 0) {
-        char buffer[10] = {0};
-        snprintf(buffer, 10, "%d", status);
-        HTTP_WRITE("<html><body><h1>Please be patient. Your spot in queue is ");
-        HTTP_WRITE(buffer);
-        HTTP_WRITE("</h1></body></html>");
+    if (status == -1) {
+        if (dir_exists(api_path->str)) {
+            HTTP_WRITE(
+                    "<html><body><h1>"
+                    "Your images are being processed, refresh for updates"
+                    "</h1><br /><hr /><br />"
+                    );
+            HTTP_WRITE("<img style='height:100px' src='/images/");
+            HTTP_WRITE(api_path->str);
+            HTTP_WRITE("/result.jpg'><br />");
+            char chr[4] = {'1', '0', '0', 0};
+            for(int i=1;i<10;i++) {
+                HTTP_WRITE("<img style='height:100px' src='/images/");
+                HTTP_WRITE(api_path->str);
+                HTTP_WRITE("/result_");
+                chr[0] = '0'+i;
+                HTTP_WRITE(chr);
+                HTTP_WRITE(".jpg'><br />");
+            }
+            HTTP_WRITE("<img style='height:100px' src='/images/");
+            HTTP_WRITE(api_path->str);
+            HTTP_WRITE("/style.jpg'></br />");
+            
+            HTTP_WRITE("<img style='height:100px' src='/images/");
+            HTTP_WRITE(api_path->str);
+            HTTP_WRITE("/source.jpg'><br />");
+            
+            HTTP_WRITE("</body></html>");
+        } else {
+            HTTP_WRITE("Nothing to see here...");
+        }
     } else {
         char buffer[10] = {0};
         snprintf(buffer, 10, "%d", status);
@@ -168,14 +241,15 @@ void *run_cmds(void *worthless) {
         pthread_mutex_lock(&queue_lock);
         n = head;
         if (n) {
+            printf("LOCKED AT: %i\n", __LINE__);
             head = head->next;
         }
         pthread_mutex_unlock(&queue_lock);
 
         if (n) {
+            printf("UNLOCKED AT: %i\n", __LINE__);
             char exec[20] = {0};
             snprintf(exec, 20, "./exec %s", n->path);
-
             system(exec);
             free(n->path);
             free(n);
@@ -204,6 +278,7 @@ int main(int argc, char **argv) {
         PATH("/submit", submit);
         PATH("/post/img", recieveimages);
         PATH("/view/_var", showprogress);
+        PATH("/images/_var/_var", send_image);
     }
     http_t *http = create_server(example, port);
     start_http_server(http);

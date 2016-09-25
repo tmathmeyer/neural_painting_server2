@@ -1,3 +1,4 @@
 #!/bin/sh
 
 echo $1
+th neural_style.lua -style_image processing/$1/style.jpg -content_image processing/$1/source.jpg -output_image processing/$1/result.jpg -backend clnn
